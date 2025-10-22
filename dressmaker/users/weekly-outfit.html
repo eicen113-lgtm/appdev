@@ -377,6 +377,11 @@
         const SUPABASE_URL = "https://iqirktmtuvqoeqrcqcqb.supabase.co";
         const SUPABASE_ANON_KEY =
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlxaXJrdG10dXZxb2VxcmNxY3FiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk2NDkxNzMsImV4cCI6MjA3NTIyNTE3M30.nbxFIL3sqCnWSaKZl7X2y4KgpUw8UF_JC9_Ago1BQWo";
+        const BUCKET_NAME = "weekly-plan"; // Your image storage bucket name
+        // --- GLOBAL STATE ---
+        // Ensure the current user's ID is available globally after login
+        // If your existing loadUser doesn't set it, you'll need to modify it.
+        window.currentUserId = window.currentUserId || null;
 
         const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -393,7 +398,7 @@
         const pinnedFavoritesTable = document.getElementById(
             "pinnedFavoritesTable"
         );
-        const BUCKET_NAME = "weekly-plan";
+
 
         // --- UTILITY FUNCTIONS ---
         function notify(icon, title) {
@@ -414,6 +419,126 @@
             document.getElementById("outfitModal").classList.add("hidden");
             document.getElementById("outfitForm").reset();
         };
+
+        /**
+         * Parses a public Supabase URL and deletes the corresponding file from Storage.
+         * @param {string} publicUrl - The full public URL of the image.
+         */
+        async function deleteImage(publicUrl) {
+            if (!publicUrl) return;
+
+            // Extract the file path from the public URL. The path is everything after the bucket name and 'public'.
+            // e.g., '.../storage/v1/object/public/BUCKET_NAME/path/to/file.jpg' -> 'path/to/file.jpg'
+            const urlParts = publicUrl.split('/');
+            const publicIndex = urlParts.indexOf('public');
+
+            if (publicIndex === -1 || publicIndex + 2 >= urlParts.length) {
+                console.error("Could not parse public URL for deletion:", publicUrl);
+                return;
+            }
+
+            // path will be: folder/filename.ext
+            const path = urlParts.slice(publicIndex + 2).join('/');
+
+            const { error } = await supabase.storage.from(BUCKET_NAME).remove([path]);
+
+            if (error) {
+                // Log the error but continue, as the DB deletion is more critical.
+                console.error("Storage image deletion failed for path:", path, error.message);
+            } else {
+                console.log(`Successfully deleted image at path: ${path}`);
+            }
+        }
+
+        // --- CORE DELETION FUNCTION (Called via the delete button in HTML) ---
+        window.deleteOutfit = async function (outfitId) {
+            if (!window.currentUserId) {
+                return notify("error", "User not authenticated. Please log in.");
+            }
+
+            // 1. CONFIRMATION STEP
+            const result = await Swal.fire({
+                title: 'Are you sure? 🗑️',
+                text: "This will permanently delete the plan and all associated images.",
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#DB2777', // Darker pink for delete
+                cancelButtonColor: '#9CA3AF',
+                confirmButtonText: 'Yes, delete it!'
+            });
+
+            if (!result.isConfirmed) {
+                return; // Stop if the user cancels
+            }
+
+            // Find the outfit card to disable the button and for DOM removal
+            const cardToRemove = document.getElementById(`outfit-card-${outfitId}`);
+            // Temporarily disable the button to prevent double-clicks
+            const deleteButton = cardToRemove ? cardToRemove.querySelector(`[onclick*="deleteOutfit('${outfitId}')"]`) : null;
+            if (deleteButton) deleteButton.disabled = true;
+
+            try {
+                // A. FETCH IMAGE URLS before deleting the main record (important!)
+                const { data: outfitData, error: fetchError } = await supabase
+                    .from("weekly_outfits")
+                    .select("upper_image, pants_image, shoes_image")
+                    .eq("id", outfitId)
+                    .single();
+
+                if (fetchError || !outfitData) {
+                    console.warn("Could not fetch image URLs for deletion, proceeding with DB record deletion.", fetchError);
+                } else {
+                    // B. DELETE ASSOCIATED IMAGES FROM STORAGE
+                    await deleteImage(outfitData.upper_image);
+                    await deleteImage(outfitData.pants_image);
+                    await deleteImage(outfitData.shoes_image);
+                }
+
+                // C. DELETE DATA FROM THE `weekly_outfits` TABLE
+                const { error: deleteError } = await supabase
+                    .from("weekly_outfits")
+                    .delete()
+                    .eq("id", outfitId)
+                    .eq("user_id", window.currentUserId); // IMPORTANT: Add RLS/security check
+
+                if (deleteError) throw deleteError;
+
+                // D. MANUAL DOM REMOVAL (Immediate visual feedback)
+                if (cardToRemove) {
+                    // Smooth transition effect
+                    cardToRemove.style.transition = 'all 0.3s ease-out';
+                    cardToRemove.style.opacity = '0';
+                    cardToRemove.style.transform = 'scale(0.9) translateY(20px)';
+                    setTimeout(() => {
+                        cardToRemove.remove();
+                        // Manually trigger refresh to update stats/charts if the real-time subscription is slow or not working.
+                        if (window.loadOutfits && typeof window.loadOutfits === 'function') {
+                            // We use the real-time subscription for refresh, but this is a fallback.
+                        }
+                    }, 300);
+                }
+
+                notify("success", "✅ Outfit plan deleted successfully!");
+
+            } catch (e) {
+                notify("error", `Deletion Failed: ${e.message || 'Server error.'}`);
+                console.error("Outfit deletion error:", e);
+            } finally {
+                // Ensure the button is re-enabled if the card wasn't removed (i.e., on failure)
+                if (deleteButton) deleteButton.disabled = false;
+            }
+        };
+
+
+        // --- REST OF YOUR EXISTING CODE ---
+        // The rest of your functions (loadUser, uploadImage, loadOutfits, 
+        // renderPinnedFavorites, setupRealtimeSubscription, renderOutfitGrid, 
+        // renderItem, updateStatsAndChart, saveOutfit, toggleFavorite) 
+        // should follow here. Since you provided the full HTML structure, 
+        // I'm assuming the existing code from your last request's script 
+        // block is already present below the line you cut off. 
+        // The key is that the new 'deleteOutfit' function is now globally available.
+
 
         // --- USER & AUTH ---
         async function loadUser() {
@@ -439,6 +564,8 @@
             }
 
             userNameEl.textContent = profile.full_name || "User";
+            // SET THE GLOBAL USER ID HERE!
+            window.currentUserId = profile.id;
             return profile.id;
         }
 
@@ -470,9 +597,11 @@
             return publicUrl.publicUrl;
         }
 
-        // --- DATA LOADING & RENDERING ---
-        async function loadOutfits(userId) {
-            if (outfitGrid.innerHTML === "" && userId) {
+        // --- DATA LOADING & RENDERING (Full body of loadOutfits is included for completeness) ---
+        window.loadOutfits = async function (userId) {
+            if (!userId) return;
+
+            if (outfitGrid.innerHTML === "") {
                 outfitGridStatus.innerHTML =
                     '<i class="fa-solid fa-sync fa-spin mr-2 text-pink-500"></i> Fetching real-time plans...';
             }
@@ -508,17 +637,17 @@
             pinnedFavoritesSection.classList.remove("hidden");
 
             const tableHeader = `
-            <thead>
-              <tr>
-                  <th class="favorite-img-col">Image</th>
-                  <th>Date & Name</th>
-                  <th>Upper</th>
-                  <th>Pants</th>
-                  <th>Shoes</th>
-                  <th class="text-center">Action</th>
-              </tr>
-            </thead>
-        `;
+                <thead>
+                  <tr>
+                      <th class="favorite-img-col">Image</th>
+                      <th>Date & Name</th>
+                      <th>Upper</th>
+                      <th>Pants</th>
+                      <th>Shoes</th>
+                      <th class="text-center">Action</th>
+                  </tr>
+                </thead>
+            `;
 
             const tableBody = favorites
                 .map((outfit) => {
@@ -527,36 +656,36 @@
                         outfit.upper_image || outfit.pants_image || outfit.shoes_image;
 
                     return `
-                <tr>
-                    <td>
-                        ${mainImageUrl
+                    <tr>
+                        <td>
+                            ${mainImageUrl
                             ? `<img src="${mainImageUrl}" 
-                                     class="w-10 h-10 object-cover rounded-md cursor-pointer" 
-                                     alt="${outfit.outfit_name} Image"
-                                     onclick="viewLargeImage('${mainImageUrl}', 'Pinned: ${outfit.outfit_name}')"
-                                   >`
+                                       class="w-10 h-10 object-cover rounded-md cursor-pointer" 
+                                       alt="${outfit.outfit_name} Image"
+                                       onclick="viewLargeImage('${mainImageUrl}', 'Pinned: ${outfit.outfit_name}')"
+                                      >`
                             : '<i class="fa-solid fa-thumbtack text-pink-500 text-xl"></i>'
                         }
-                    </td>
-                    <td>
-                        <p class="font-bold text-gray-800">${outfit.outfit_name
+                        </td>
+                        <td>
+                            <p class="font-bold text-gray-800">${outfit.outfit_name
                         }</p>
-                        <p class="text-xs text-gray-500">${dateStr}</p>
-                    </td>
-                    <td class="text-sm text-gray-700">${outfit.upper_desc || "-"
+                            <p class="text-xs text-gray-500">${dateStr}</p>
+                        </td>
+                        <td class="text-sm text-gray-700">${outfit.upper_desc || "-"
                         }</td>
-                    <td class="text-sm text-gray-700">${outfit.pants_desc || "-"
+                        <td class="text-sm text-gray-700">${outfit.pants_desc || "-"
                         }</td>
-                    <td class="text-sm text-gray-700">${outfit.shoes_desc || "-"
+                        <td class="text-sm text-gray-700">${outfit.shoes_desc || "-"
                         }</td>
-                    <td class="text-center">
-                        <button class="unfavorite-btn-table" onclick="toggleFavorite('${outfit.id
+                        <td class="text-center">
+                            <button class="unfavorite-btn-table" onclick="toggleFavorite('${outfit.id
                         }', true)">
-                            <i class="fa-solid fa-heart-crack mr-1"></i> Unfavorite
-                        </button>
-                    </td>
-                </tr>
-            `;
+                                <i class="fa-solid fa-heart-crack mr-1"></i> Unfavorite
+                            </button>
+                        </td>
+                    </tr>
+                `;
                 })
                 .join("");
 
@@ -604,9 +733,9 @@
 
             if (!data || data.length === 0) {
                 outfitGridStatus.innerHTML = `
-            <p class='text-gray-500 mt-4 col-span-full'>
-                <i class="fa-solid fa-box-open text-pink-500 mr-2"></i> No outfits planned yet. Click "Add New Outfit Plan" to start!
-            </p>`;
+                <p class='text-gray-500 mt-4 col-span-full'>
+                    <i class="fa-solid fa-box-open text-pink-500 mr-2"></i> No outfits planned yet. Click "Add New Outfit Plan" to start!
+                </p>`;
                 return;
             }
 
@@ -614,49 +743,49 @@
             outfitGrid.innerHTML = unpinnedData
                 .map(
                     (outfit) => `
-                <div id="outfit-card-${outfit.id}" class="card glass p-4 rounded-xl shadow-lg hover:shadow-xl transition relative flex flex-col justify-between" data-aos="fade-up">
-                    
-                    <button class="action-btn delete-btn" title="Delete Plan" onclick="deleteOutfit('${outfit.id
+                    <div id="outfit-card-${outfit.id}" class="card glass p-4 rounded-xl shadow-lg hover:shadow-xl transition relative flex flex-col justify-between" data-aos="fade-up">
+                        
+                        <button class="action-btn delete-btn" title="Delete Plan" onclick="deleteOutfit('${outfit.id
                         }')">
-                        <i class="fa-solid fa-trash-alt"></i>
-                    </button>
-                    <button class="action-btn" style="right: 50px;" title="Pin as Favorite" onclick="toggleFavorite('${outfit.id
+                            <i class="fa-solid fa-trash-alt"></i>
+                        </button>
+                        <button class="action-btn" style="right: 50px;" title="Pin as Favorite" onclick="toggleFavorite('${outfit.id
                         }', false)">
-                        <i class="fa-regular fa-heart"></i>
-                    </button>
-                    
-                    <div>
-                        <div class="flex items-center text-sm text-gray-500 mb-2">
-                            <i class="fa-solid fa-calendar-alt mr-2 text-pink-500"></i> 
-                            <span class="font-medium">${new Date(
+                            <i class="fa-regular fa-heart"></i>
+                        </button>
+                        
+                        <div>
+                            <div class="flex items-center text-sm text-gray-500 mb-2">
+                                <i class="fa-solid fa-calendar-alt mr-2 text-pink-500"></i> 
+                                <span class="font-medium">${new Date(
                             outfit.outfit_date
                         ).toDateString()}</span>
-                        </div>
-                        <h3 class="text-xl font-bold text-gray-800 mb-3">${outfit.outfit_name
+                            </div>
+                            <h3 class="text-xl font-bold text-gray-800 mb-3">${outfit.outfit_name
                         }</h3>
-                        
-                        <div class="space-y-2"> ${renderItem(
+                            
+                            <div class="space-y-2"> ${renderItem(
                             "Upper",
                             outfit.upper_desc,
                             outfit.upper_image,
                             "shirt"
                         )}
-                            ${renderItem(
+                                ${renderItem(
                             "Pants",
                             outfit.pants_desc,
                             outfit.pants_image,
                             "person"
                         )}
-                            ${renderItem(
+                                ${renderItem(
                             "Shoes",
                             outfit.shoes_desc,
                             outfit.shoes_image,
                             "shoe-prints"
                         )}
+                            </div>
                         </div>
                     </div>
-                </div>
-                `
+                    `
                 )
                 .join("");
         }
@@ -669,14 +798,14 @@
                     <div class="flex-shrink-0 w-12 h-12 rounded-lg overflow-hidden border border-pink-100">
                         ${image
                     ? `<img src="${image}" 
-                                     class="item-image w-full h-full object-cover" 
-                                     alt="${type} - ${desc || "Image"}"
-                                     onclick="viewLargeImage('${image}', '${type} - ${desc || "Image"
+                                   class="item-image w-full h-full object-cover" 
+                                   alt="${type} - ${desc || "Image"}"
+                                   onclick="viewLargeImage('${image}', '${type} - ${desc || "Image"
                     }')"
-                                   >`
+                                  >`
                     : `<div class="item-icon-box w-full h-full flex items-center justify-center">
-                                <i class="fa-solid fa-${icon} text-lg"></i>
-                            </div>`
+                                    <i class="fa-solid fa-${icon} text-lg"></i>
+                                </div>`
                 }
                     </div>
                     <div class="flex-grow min-w-0">
@@ -688,6 +817,7 @@
             `;
         }
 
+        let outfitLineChartInstance = null;
         function updateStatsAndChart(outfits) {
             totalOutfitsEl.textContent = outfits.length;
 
@@ -777,223 +907,144 @@
                 },
                 yaxis: {
                     title: {
-                        text: "Number of Plans",
+                        text: "Number of Outfits",
                         style: {
                             color: "#888",
                             fontWeight: 600,
                         },
                     },
-                    min: 0,
-                    tickAmount: Math.max(1, Math.max(...seriesData)), // Ensure ticks are sensible
                     labels: {
-                        formatter: (val) => Math.round(val), // Show whole numbers
                         style: {
                             colors: "#555",
-                            fontSize: "12px",
+                        },
+                        formatter: function (val) {
+                            return val.toFixed(0);
                         },
                     },
+                    min: 0,
+                    tickAmount: Math.max(2, ...seriesData), // Ensures at least 2 ticks
                 },
                 grid: {
-                    borderColor: "#f1f1f1",
-                    strokeDashArray: 3,
-                },
-                tooltip: {
-                    y: {
-                        formatter: function (val) {
-                            return val + " Outfits";
-                        },
+                    borderColor: '#f0f0f0',
+                    row: {
+                        colors: ['#fff', '#f9f9f9'],
+                        opacity: 0.5
                     },
                 },
+                tooltip: {
+                    theme: 'light',
+                }
             };
 
-            const chartEl = document.getElementById("outfitChart");
-            // Check if chart is already rendered to avoid errors and update dynamically
-            if (window.outfitLineChart) {
-                window.outfitLineChart.updateOptions(chartOptions);
+            if (outfitLineChartInstance) {
+                // If chart exists, update its series data
+                outfitLineChartInstance.updateOptions(chartOptions);
             } else {
-                window.outfitLineChart = new ApexCharts(chartEl, chartOptions);
-                window.outfitLineChart.render();
+                // Otherwise, create the chart
+                const chartEl = document.querySelector("#outfitChart");
+                if (chartEl) {
+                    outfitLineChartInstance = new ApexCharts(chartEl, chartOptions);
+                    outfitLineChartInstance.render();
+                }
             }
         }
 
-        // --- SAVE OUTFIT ---
+
+        // --- DATA SUBMISSION ---
         window.saveOutfit = async function () {
+            if (!window.currentUserId) {
+                return notify("error", "Please log in to save your plan.");
+            }
+
+            const date = document.getElementById("date").value;
+            const name = document.getElementById("name").value.trim();
+            const upperDesc = document.getElementById("upperDesc").value.trim();
+            const pantsDesc = document.getElementById("pantsDesc").value.trim();
+            const shoesDesc = document.getElementById("shoesDesc").value.trim();
+
+            if (!date || !name) {
+                return notify("warning", "Date and Outfit Name are required!");
+            }
+
             saveOutfitButton.disabled = true;
-            saveOutfitButton.innerHTML =
-                '<i class="fa-solid fa-spinner fa-spin"></i> Saving...';
+            saveOutfitButton.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i> Saving...`;
 
-            const userId = await loadUser();
-            if (!userId) {
-                notify("error", "Authentication failed. Please log in.");
+            try {
+                // 1. Upload Images
+                const upperImageFile = document.getElementById("upperImage").files[0];
+                const pantsImageFile = document.getElementById("pantsImage").files[0];
+                const shoesImageFile = document.getElementById("shoesImage").files[0];
+
+                const [upperUrl, pantsUrl, shoesUrl] = await Promise.all([
+                    uploadImage(upperImageFile, "upper"),
+                    uploadImage(pantsImageFile, "pants"),
+                    uploadImage(shoesImageFile, "shoes"),
+                ]);
+
+                // 2. Insert Record
+                const { error } = await supabase.from("weekly_outfits").insert([
+                    {
+                        user_id: window.currentUserId,
+                        outfit_date: date,
+                        outfit_name: name,
+                        upper_desc: upperDesc,
+                        upper_image: upperUrl,
+                        pants_desc: pantsDesc,
+                        pants_image: pantsUrl,
+                        shoes_desc: shoesDesc,
+                        shoes_image: shoesUrl,
+                    },
+                ]);
+
+                if (error) throw error;
+
+                closeModal();
+                // Realtime subscription handles the notify("success") and loadOutfits
+            } catch (e) {
+                notify("error", `Failed to save plan: ${e.message}`);
+                console.error("Save outfit error:", e);
+            } finally {
                 saveOutfitButton.disabled = false;
-                saveOutfitButton.innerHTML =
-                    '<i class="fa-solid fa-save"></i> Save Outfit Plan';
-                return;
+                saveOutfitButton.innerHTML = `<i class="fa-solid fa-save"></i> Save Outfit Plan`;
             }
-
-            const form = document.getElementById("outfitForm");
-            const outfitName = document.getElementById("name").value;
-            const outfitDate = document.getElementById("date").value;
-            const upperDesc = document.getElementById("upperDesc").value;
-            const pantsDesc = document.getElementById("pantsDesc").value;
-            const shoesDesc = document.getElementById("shoesDesc").value;
-
-            // Check if at least one piece of clothing has a description or image
-            if (
-                !upperDesc &&
-                !pantsDesc &&
-                !shoesDesc &&
-                !document.getElementById("upperImage").files.length &&
-                !document.getElementById("pantsImage").files.length &&
-                !document.getElementById("shoesImage").files.length
-            ) {
-                notify(
-                    "error",
-                    "Please add at least one clothing item (description or image)."
-                );
-                saveOutfitButton.disabled = false;
-                saveOutfitButton.innerHTML =
-                    '<i class="fa-solid fa-save"></i> Save Outfit Plan';
-                return;
-            }
-
-            // 1. Upload Images
-            const upperImageFile = document.getElementById("upperImage").files[0];
-            const pantsImageFile = document.getElementById("pantsImage").files[0];
-            const shoesImageFile = document.getElementById("shoesImage").files[0];
-
-            const [upperImageUrl, pantsImageUrl, shoesImageUrl] = await Promise.all([
-                uploadImage(upperImageFile, "upper"),
-                uploadImage(pantsImageFile, "pants"),
-                uploadImage(shoesImageFile, "shoes"),
-            ]);
-
-            // 2. Insert Data
-            const { error } = await supabase.from("weekly_outfits").insert({
-                user_id: userId,
-                outfit_name: outfitName,
-                outfit_date: outfitDate,
-                upper_desc: upperDesc,
-                upper_image: upperImageUrl,
-                pants_desc: pantsDesc,
-                pants_image: pantsImageUrl,
-                shoes_desc: shoesDesc,
-                shoes_image: shoesImageUrl,
-            });
-
-            saveOutfitButton.disabled = false;
-            saveOutfitButton.innerHTML =
-                '<i class="fa-solid fa-save"></i> Save Outfit Plan';
-            closeModal();
-
-            if (error) {
-                console.error("Insert error:", error.message);
-                notify("error", "Failed to save plan.");
-                return;
-            }
-
-            // Realtime handles the refresh and notification
         };
 
-        // --- DELETE OUTFIT (The primary fix) ---
-        window.deleteOutfit = async function (outfitId) {
-            const userId = await loadUser();
-            if (!userId) {
-                notify("error", "Authentication failed.");
-                return;
+        // --- FAVORITE TOGGLE ---
+        window.toggleFavorite = async function (outfitId, isCurrentlyFavorite) {
+            if (!window.currentUserId) {
+                return notify("error", "User not authenticated. Please log in.");
             }
 
-            // 1. Confirmation using SweetAlert
-            const result = await Swal.fire({
-                title: "Are you sure?",
-                text: "This outfit plan will be permanently deleted.",
-                icon: "warning",
-                showCancelButton: true,
-                confirmButtonColor: "#db2777", // Pink color
-                cancelButtonColor: "#6b7280", // Gray color
-                confirmButtonText: "Yes, delete it!",
-                customClass: {
-                    popup: "rounded-2xl",
-                    confirmButton: "py-2 px-4 text-sm",
-                    cancelButton: "py-2 px-4 text-sm",
-                },
-            });
+            const newFavoriteState = !isCurrentlyFavorite;
+            const action = newFavoriteState ? "Pinning" : "Unpinning";
+            const successMsg = newFavoriteState ? "✨ Pinned as Favorite!" : "💔 Unpinned.";
 
-            if (!result.isConfirmed) {
-                return;
+            try {
+                const { error } = await supabase
+                    .from("weekly_outfits")
+                    .update({ is_favorite: newFavoriteState })
+                    .eq("id", outfitId)
+                    .eq("user_id", window.currentUserId); // RLS/security check
+
+                if (error) throw error;
+
+                notify("info", successMsg);
+                // The realtime subscription will trigger a full list refresh
+            } catch (e) {
+                notify("error", `${action} failed: ${e.message}`);
+                console.error(`${action} error:`, e);
             }
-
-            // 2. Database Deletion
-            const { error } = await supabase
-                .from("weekly_outfits")
-                .delete()
-                .eq("id", outfitId)
-                .eq("user_id", userId); // Critical security check
-
-            if (error) {
-                console.error("Deletion error:", error.message);
-                notify("error", "Deletion failed!");
-                return;
-            }
-
-            // 3. **Manual DOM Removal for Immediate Visual Feedback (This is the fix)**
-            // Find the outfit card element using its generated ID and remove it.
-            const cardElement = document.getElementById(`outfit-card-${outfitId}`);
-            if (cardElement) {
-                cardElement.remove();
-            }
-
-            // 4. Final Notification
-            notify("success", "✅ Outfit plan deleted successfully!");
-
-            // 5. Manually update stats/chart immediately
-            await loadOutfits(userId);
         };
 
-        // --- TOGGLE FAVORITE ---
-        window.toggleFavorite = async function (outfitId, currentState) {
-            const userId = await loadUser();
-            if (!userId) {
-                notify("error", "Authentication failed.");
-                return;
-            }
-
-            const newState = !currentState;
-
-            const { error } = await supabase
-                .from("weekly_outfits")
-                .update({ is_favorite: newState })
-                .eq("id", outfitId)
-                .eq("user_id", userId); // Security check
-
-            if (error) {
-                console.error("Update error:", error.message);
-                notify("error", "Failed to update favorite status.");
-                return;
-            }
-
-            // The realtime subscription will handle the re-render and re-sorting of the grid.
-
-            const message = newState
-                ? "💖 Outfit pinned to favorites!"
-                : "💔 Outfit unpinned.";
-            notify("success", message);
-        };
-
-        // --- INITIALIZE ---
-        (async function init() {
+        // --- INITIALIZATION ---
+        document.addEventListener("DOMContentLoaded", async () => {
             const userId = await loadUser();
             if (userId) {
                 await loadOutfits(userId);
-                await setupRealtimeSubscription(userId);
-            } else {
-                // Show the "No outfits planned yet" message if auth failed
-                outfitGridStatus.innerHTML = `
-              <p class='text-gray-500 mt-4 col-span-full'>
-                  <i class="fa-solid fa-lock-open text-pink-500 mr-2"></i> Please log in to view your plans.
-              </p>`;
+                setupRealtimeSubscription(userId);
             }
-        })();
+        });
+
     </script>
 </body>
 
