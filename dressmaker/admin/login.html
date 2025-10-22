@@ -199,9 +199,21 @@
           return;
         }
 
+        // --- FIX: Define userId from the successful authData object ---
+        const userId = authData?.user?.id;
 
+        if (!userId) {
+            await supabaseClient.auth.signOut();
+            notify("error", "Login Failed", "Authentication succeeded, but user ID was missing.");
+            loginButton.disabled = false;
+            loginButton.innerHTML =
+                '<i class="fas fa-sign-in-alt mr-2"></i> Admin Log In';
+            loginButton.classList.remove("opacity-70", "cursor-not-allowed");
+            return;
+        }
+        // -----------------------------------------------------------------
 
-        console.log(`User ID authenticated: ${userId}. Checking admin role...`); // Debug output
+        console.log(`User ID authenticated: ${userId}. Checking admin role...`); // Debug output now works
 
         const { data: adminData, error: adminCheckError } = await supabaseClient
           .from("admin_users_secure") // <-- ASSUMES SECURE TABLE NAME
@@ -263,6 +275,3 @@
     </script>
   </body>
 </html>
-
-
-
