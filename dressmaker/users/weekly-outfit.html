@@ -369,6 +369,7 @@
         };
     </script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
 
     <script type="module">
         import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.3/+esm";
@@ -380,7 +381,6 @@
         const BUCKET_NAME = "weekly-plan"; // Your image storage bucket name
         // --- GLOBAL STATE ---
         // Ensure the current user's ID is available globally after login
-        // If your existing loadUser doesn't set it, you'll need to modify it.
         window.currentUserId = window.currentUserId || null;
 
         const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -451,6 +451,11 @@
         }
 
         // --- CORE DELETION FUNCTION (Called via the delete button in HTML) ---
+        /**
+         * Handles the complete process of deleting an outfit: confirmation, 
+         * storage file deletion, database record deletion, and UI update.
+         * @param {string} outfitId - The UUID of the outfit to delete.
+         */
         window.deleteOutfit = async function (outfitId) {
             if (!window.currentUserId) {
                 return notify("error", "User not authenticated. Please log in.");
@@ -479,6 +484,7 @@
 
             try {
                 // A. FETCH IMAGE URLS before deleting the main record (important!)
+                // We need the URLs to delete from storage BEFORE we delete the row from the DB.
                 const { data: outfitData, error: fetchError } = await supabase
                     .from("weekly_outfits")
                     .select("upper_image, pants_image, shoes_image")
@@ -486,22 +492,30 @@
                     .single();
 
                 if (fetchError || !outfitData) {
+                    // This error is NOT critical, we just skip image deletion and proceed to DB delete.
                     console.warn("Could not fetch image URLs for deletion, proceeding with DB record deletion.", fetchError);
                 } else {
                     // B. DELETE ASSOCIATED IMAGES FROM STORAGE
-                    await deleteImage(outfitData.upper_image);
-                    await deleteImage(outfitData.pants_image);
-                    await deleteImage(outfitData.shoes_image);
+                    // Use Promise.allSettled to allow one image deletion to fail without stopping others
+                    await Promise.allSettled([
+                        deleteImage(outfitData.upper_image),
+                        deleteImage(outfitData.pants_image),
+                        deleteImage(outfitData.shoes_image),
+                    ]);
                 }
 
                 // C. DELETE DATA FROM THE `weekly_outfits` TABLE
+                // This is the CRITICAL STEP that fails without RLS!
                 const { error: deleteError } = await supabase
                     .from("weekly_outfits")
                     .delete()
                     .eq("id", outfitId)
-                    .eq("user_id", window.currentUserId); // IMPORTANT: Add RLS/security check
+                    .eq("user_id", window.currentUserId); // RLS Check: ensures only the owner can delete
 
-                if (deleteError) throw deleteError;
+                if (deleteError) {
+                    // If the database delete fails (likely RLS issue), throw the error
+                    throw deleteError;
+                }
 
                 // D. MANUAL DOM REMOVAL (Immediate visual feedback)
                 if (cardToRemove) {
@@ -509,35 +523,32 @@
                     cardToRemove.style.transition = 'all 0.3s ease-out';
                     cardToRemove.style.opacity = '0';
                     cardToRemove.style.transform = 'scale(0.9) translateY(20px)';
+
+                    // Remove element after the transition is complete
                     setTimeout(() => {
                         cardToRemove.remove();
-                        // Manually trigger refresh to update stats/charts if the real-time subscription is slow or not working.
-                        if (window.loadOutfits && typeof window.loadOutfits === 'function') {
-                            // We use the real-time subscription for refresh, but this is a fallback.
-                        }
                     }, 300);
                 }
 
                 notify("success", "✅ Outfit plan deleted successfully!");
+                // The realtime subscription should refresh stats, but we call loadOutfits
+                // as a safety measure to instantly refresh stats/charts/favorites table.
+                window.loadOutfits(window.currentUserId);
+
 
             } catch (e) {
-                notify("error", `Deletion Failed: ${e.message || 'Server error.'}`);
+                // This block executes if the DB deletion failed (most likely RLS denial)
+                notify("error", `Deletion Failed: ${e.message || 'Server error.'}\nDid you set your RLS Policy?`);
                 console.error("Outfit deletion error:", e);
-            } finally {
-                // Ensure the button is re-enabled if the card wasn't removed (i.e., on failure)
+                // Re-enable the button on failure
                 if (deleteButton) deleteButton.disabled = false;
+            } finally {
+                // No need to re-enable button if card is removed, but for safety on fetch errors:
+                if (deleteButton && cardToRemove && cardToRemove.parentElement) {
+                    deleteButton.disabled = false;
+                }
             }
         };
-
-
-        // --- REST OF YOUR EXISTING CODE ---
-        // The rest of your functions (loadUser, uploadImage, loadOutfits, 
-        // renderPinnedFavorites, setupRealtimeSubscription, renderOutfitGrid, 
-        // renderItem, updateStatsAndChart, saveOutfit, toggleFavorite) 
-        // should follow here. Since you provided the full HTML structure, 
-        // I'm assuming the existing code from your last request's script 
-        // block is already present below the line you cut off. 
-        // The key is that the new 'deleteOutfit' function is now globally available.
 
 
         // --- USER & AUTH ---
@@ -696,7 +707,11 @@
         async function setupRealtimeSubscription(userId) {
             const channelName = `outfit_changes_${userId}`;
             // Ensure to remove existing channel to prevent duplicate listeners
-            await supabase.removeChannel(supabase.channel(channelName));
+            // Supabase client automatically handles channels, but explicit removal can be safer
+            const existingChannel = supabase.getChannels().find(c => c.topic === `public:weekly_outfits:user_id=eq.${userId}`);
+            if (existingChannel) {
+                await supabase.removeChannel(existingChannel);
+            }
 
             const channel = supabase.channel(channelName);
 
@@ -714,7 +729,8 @@
                         // Call loadOutfits to re-fetch and re-render
                         loadOutfits(userId);
 
-                        // Only show notification for insert (delete is handled inside deleteOutfit)
+                        // Only show notification for insert 
+                        // (delete is handled inside deleteOutfit, update/favorite is handled inside toggleFavorite)
                         if (payload.eventType === "INSERT") {
                             notify("success", "🆕 New plan added!");
                         }
@@ -938,7 +954,7 @@
 
             if (outfitLineChartInstance) {
                 // If chart exists, update its series data
-                outfitLineChartInstance.updateOptions(chartOptions);
+                ApexCharts.exec("outfitLineChartInstance", 'updateOptions', chartOptions);
             } else {
                 // Otherwise, create the chart
                 const chartEl = document.querySelector("#outfitChart");
